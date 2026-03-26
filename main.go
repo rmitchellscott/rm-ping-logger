@@ -41,16 +41,17 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
-var dropHeaders = map[string]bool{
-	"X-Forwarded-For":    true,
-	"X-Forwarded-Host":   true,
-	"X-Forwarded-Port":   true,
-	"X-Forwarded-Proto":  true,
-	"X-Forwarded-Scheme": true,
-	"X-Real-Ip":          true,
-	"X-Request-Id":       true,
-	"X-Scheme":           true,
-	"Accept-Encoding":    true,
+type analyticsBody struct {
+	DeviceType      string `json:"device_type"`
+	SoftwareVersion string `json:"software_version"`
+	OSVersion       string `json:"os_version"`
+	ProductType     string `json:"product_type"`
+	Events          []struct {
+		EventName       string         `json:"event_name"`
+		EventProperties map[string]any `json:"event_properties"`
+		EventTimestamp  int64          `json:"event_timestamp"`
+	} `json:"events"`
+	UserProperties map[string]string `json:"user_properties"`
 }
 
 func logHandler(lokiURL string, status int, responseBody string) http.HandlerFunc {
@@ -58,36 +59,38 @@ func logHandler(lokiURL string, status int, responseBody string) http.HandlerFun
 		body, _ := io.ReadAll(r.Body)
 		defer r.Body.Close()
 
-		var parsedBody any
-		if err := json.Unmarshal(body, &parsedBody); err != nil {
-			parsedBody = string(body)
-		}
+		var entry any
 
-		headers := make(map[string]any)
-		for k, v := range r.Header {
-			if dropHeaders[k] {
-				continue
+		var ab analyticsBody
+		if err := json.Unmarshal(body, &ab); err == nil && len(ab.Events) > 0 {
+			for _, evt := range ab.Events {
+				entry = map[string]any{
+					"path":             r.URL.Path,
+					"device_type":      ab.DeviceType,
+					"software_version": ab.SoftwareVersion,
+					"os_version":       ab.OSVersion,
+					"event_name":       evt.EventName,
+					"event_properties": evt.EventProperties,
+					"event_timestamp":  evt.EventTimestamp,
+					"user_agent":       r.Header.Get("User-Agent"),
+				}
+				entryJSON, _ := json.Marshal(entry)
+				fmt.Println(string(entryJSON))
+				if lokiURL != "" {
+					go pushToLoki(lokiURL, r.URL.Path, evt.EventName, entryJSON)
+				}
 			}
-			if len(v) == 1 {
-				headers[k] = v[0]
-			} else {
-				headers[k] = v
+		} else {
+			entry = map[string]any{
+				"path":       r.URL.Path,
+				"user_agent": r.Header.Get("User-Agent"),
+				"body":       string(body),
 			}
-		}
-
-		entry := map[string]any{
-			"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-			"method":    r.Method,
-			"path":      r.URL.Path,
-			"headers":   headers,
-			"body":      parsedBody,
-		}
-
-		entryJSON, _ := json.Marshal(entry)
-		fmt.Println(string(entryJSON))
-
-		if lokiURL != "" {
-			go pushToLoki(lokiURL, r.URL.Path, entryJSON)
+			entryJSON, _ := json.Marshal(entry)
+			fmt.Println(string(entryJSON))
+			if lokiURL != "" {
+				go pushToLoki(lokiURL, r.URL.Path, "", entryJSON)
+			}
 		}
 
 		if responseBody != "" {
@@ -100,13 +103,18 @@ func logHandler(lokiURL string, status int, responseBody string) http.HandlerFun
 	}
 }
 
-func pushToLoki(lokiURL string, path string, entryJSON []byte) {
+func pushToLoki(lokiURL string, path string, eventName string, entryJSON []byte) {
+	labels := map[string]string{
+		"app":  "rm-ping-logger",
+		"path": path,
+	}
+	if eventName != "" {
+		labels["event_name"] = eventName
+	}
+
 	payload := lokiPush{
 		Streams: []lokiStream{{
-			Stream: map[string]string{
-				"app":  "rm-ping-logger",
-				"path": path,
-			},
+			Stream: labels,
 			Values: [][]string{
 				{fmt.Sprintf("%d", time.Now().UnixNano()), string(entryJSON)},
 			},
