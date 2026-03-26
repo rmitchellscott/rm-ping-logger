@@ -41,20 +41,46 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
+var dropHeaders = map[string]bool{
+	"X-Forwarded-For":    true,
+	"X-Forwarded-Host":   true,
+	"X-Forwarded-Port":   true,
+	"X-Forwarded-Proto":  true,
+	"X-Forwarded-Scheme": true,
+	"X-Real-Ip":          true,
+	"X-Request-Id":       true,
+	"X-Scheme":           true,
+	"Accept-Encoding":    true,
+}
+
 func logHandler(lokiURL string, status int, responseBody string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		defer r.Body.Close()
 
+		var parsedBody any
+		if err := json.Unmarshal(body, &parsedBody); err != nil {
+			parsedBody = string(body)
+		}
+
+		headers := make(map[string]any)
+		for k, v := range r.Header {
+			if dropHeaders[k] {
+				continue
+			}
+			if len(v) == 1 {
+				headers[k] = v[0]
+			} else {
+				headers[k] = v
+			}
+		}
+
 		entry := map[string]any{
-			"timestamp":      time.Now().UTC().Format(time.RFC3339Nano),
-			"method":         r.Method,
-			"path":           r.URL.Path,
-			"query":          r.URL.RawQuery,
-			"headers":        r.Header,
-			"content_length": r.ContentLength,
-			"remote_addr":    r.RemoteAddr,
-			"body":           string(body),
+			"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
+			"method":    r.Method,
+			"path":      r.URL.Path,
+			"headers":   headers,
+			"body":      parsedBody,
 		}
 
 		entryJSON, _ := json.Marshal(entry)
