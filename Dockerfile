@@ -5,8 +5,8 @@ WORKDIR /app
 COPY --from=xx / /
 RUN apk add --no-cache git
 
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod ./
+COPY go.sum* ./
 
 COPY . .
 
